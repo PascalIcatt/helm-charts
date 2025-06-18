@@ -216,34 +216,32 @@ jobs:
             echo "🛠️ Attempting to render with minimal required values..."
             
             # Create a minimal values file for scanning purposes
-            cat > scan-minimal-values.yaml << 'EOF'
-# Minimal values for security scanning purposes
-# Add any required values that templates need to render successfully
-
-# Common required values - adjust based on your chart needs:
-global:
-  # Add global values if needed
-
-# Fix for common missing values:
-notificationsSecretKey: "dummy-key-for-scanning"
-database:
-  password: "dummy-password-for-scanning"
-auth:
-  secret: "dummy-secret-for-scanning"
-
-# Add your chart-specific required values here based on error messages
-# Example for zac chart:
-zac:
-  notificationsSecretKey: "dummy-key-for-scanning"
-
-# Example for other common required values:
-# rabbitmq:
-#   auth:
-#     password: "dummy-password-for-scanning"
-# redis:
-#   auth:
-#     password: "dummy-password-for-scanning"
-EOF
+            echo "# Minimal values for security scanning purposes" > scan-minimal-values.yaml
+            echo "# Add any required values that templates need to render successfully" >> scan-minimal-values.yaml
+            echo "" >> scan-minimal-values.yaml
+            echo "# Common required values - adjust based on your chart needs:" >> scan-minimal-values.yaml
+            echo "global:" >> scan-minimal-values.yaml
+            echo "  # Add global values if needed" >> scan-minimal-values.yaml
+            echo "" >> scan-minimal-values.yaml
+            echo "# Fix for common missing values:" >> scan-minimal-values.yaml
+            echo "notificationsSecretKey: \"dummy-key-for-scanning\"" >> scan-minimal-values.yaml
+            echo "database:" >> scan-minimal-values.yaml
+            echo "  password: \"dummy-password-for-scanning\"" >> scan-minimal-values.yaml
+            echo "auth:" >> scan-minimal-values.yaml
+            echo "  secret: \"dummy-secret-for-scanning\"" >> scan-minimal-values.yaml
+            echo "" >> scan-minimal-values.yaml
+            echo "# Add your chart-specific required values here based on error messages" >> scan-minimal-values.yaml
+            echo "# Example for zac chart:" >> scan-minimal-values.yaml
+            echo "zac:" >> scan-minimal-values.yaml
+            echo "  notificationsSecretKey: \"dummy-key-for-scanning\"" >> scan-minimal-values.yaml
+            echo "" >> scan-minimal-values.yaml
+            echo "# Example for other common required values:" >> scan-minimal-values.yaml
+            echo "# rabbitmq:" >> scan-minimal-values.yaml
+            echo "#   auth:" >> scan-minimal-values.yaml
+            echo "#     password: \"dummy-password-for-scanning\"" >> scan-minimal-values.yaml
+            echo "# redis:" >> scan-minimal-values.yaml
+            echo "#   auth:" >> scan-minimal-values.yaml
+            echo "#     password: \"dummy-password-for-scanning\"" >> scan-minimal-values.yaml
 
             # Try again with minimal values
             if helm template "${chart_name}" . \
