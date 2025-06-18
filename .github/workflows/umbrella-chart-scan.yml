@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  HELM_CHART_PATH: "./charts/podiumd"  # Adjust to your umbrella chart path
+  HELM_CHART_PATH: "./charts/podiumd"  # Path to your umbrella chart
   RENDERED_OUTPUT_PATH: "./rendered-manifests"
   FAIL_ON_VULNERABILITY: "false"  # Set to "true" to fail workflow on critical/high vulnerabilities
 
@@ -353,7 +353,46 @@ jobs:
             grep -v "^$" >> extracted_images.txt
           
           # Remove duplicates and filter out invalid entries
-          sort -u extracted_images.txt | grep -E '^[a-zA-Z0-9][a-zA-Z0-9._/-]*:[a-zA-Z0-9._-]+
+          sort -u extracted_images.txt | grep -E '^[a-zA-Z0-9][a-zA-Z0-9._/-]*:[a-zA-Z0-9._-]+$' > final_images.txt
+          
+          # Create JSON array for matrix strategy
+          if [ -s final_images.txt ]; then
+            images_json=$(jq -R -s -c 'split("\n") | map(select(length > 0))' final_images.txt)
+            
+            # Create matrix with chunking for better performance (max 8 images per job)
+            # Using standard jq without custom functions - FIXED: floor division to avoid floating point
+            matrix_json=$(echo "$images_json" | jq -c '
+              [range(0; length; 8) as $i | 
+                {
+                  chunk: ($i / 8 | floor), 
+                  images: .[$i:$i+8]
+                }
+              ]
+            ')
+            
+            image_count=$(echo "$images_json" | jq 'length')
+            echo "✅ Found ${image_count} unique container images"
+          else
+            echo "⚠️ No container images found in rendered templates"
+            echo "🔧 This might be because:"
+            echo "   - Templates failed to render completely"
+            echo "   - Chart doesn't contain container workloads"
+            echo "   - Images are referenced differently than expected"
+            
+            images_json='[]'
+            matrix_json='[]'
+          fi
+          
+          # Set outputs with explicit labels
+          {
+            echo "images=${images_json}"
+            echo "matrix=${matrix_json}"
+          } >> $GITHUB_OUTPUT
+          
+          # Debug output
+          echo "=== Extracted Images ==="
+          cat final_images.txt || echo "No images found"
+          echo "======================="
 
       - name: Upload rendered manifests
         uses: actions/upload-artifact@v4
@@ -545,506 +584,6 @@ jobs:
             
             exit 0
           fi
-          
-          # Find all SARIF files
-          find all-scan-results -name "*.sarif" > sarif_files.txt
-          
-          # Initialize vulnerability counters for workflow failure logic
-          total_critical=0
-          total_high=0
-          
-          if [ -s sarif_files.txt ]; then
-            echo "📊 Consolidating SARIF files:"
-            cat sarif_files.txt
-            
-            # Merge all SARIF files into one
-            sarif merge $(cat sarif_files.txt) --output-file consolidated-image-results/umbrella-chart-scan.sarif
-            
-            # Create consolidated SBOM tarball with both formats
-            if [ -d "all-sbom-results" ] && [ "$(ls -A all-sbom-results)" ]; then
-              echo "📦 Creating consolidated SBOM archive..."
-              tar -czf consolidated-image-results/all-sboms.tar.gz -C all-sbom-results .
-              spdx_count=$(find all-sbom-results -name "*-sbom-spdx.json" | wc -l)
-              cyclone_count=$(find all-sbom-results -name "*-sbom-cyclone.json" | wc -l)
-              echo "✅ Archived ${spdx_count} SPDX and ${cyclone_count} CycloneDX SBOM files"
-            fi
-            
-            # Create detailed summary
-            {
-              echo "# 🔍 Container Vulnerability Scan Summary"
-              echo ""
-              echo "**Chart:** ${{ needs.prepare-scan.outputs.chart-name }}"
-              echo "**Scan Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-              echo "**Trigger:** ${{ github.event_name }}"
-              echo ""
-              echo "## 📋 Results by Image"
-              echo ""
-              echo "| Image | Critical | High | Total | SPDX SBOM | CycloneDX SBOM |"
-              echo "|-------|----------|------|-------|-----------|----------------|"
-            } > consolidated-image-results/summary.md
-            
-            # Process JSON results for summary
-            for json_file in all-scan-results/*.json; do
-              if [ -f "$json_file" ]; then
-                # Reconstruct image name from filename
-                base_name=$(basename "$json_file" .json)
-                image_name=$(echo "$base_name" | sed 's/_/\//g; s/\//:/1')
-                
-                critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$json_file" 2>/dev/null || echo "0")
-                high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$json_file" 2>/dev/null || echo "0")
-                total=$((critical + high))
-                
-                # Add to global counters
-                total_critical=$((total_critical + critical))
-                total_high=$((total_high + high))
-                
-                # Check if SBOMs exist
-                spdx_file="all-sbom-results/${base_name}-sbom-spdx.json"
-                cyclone_file="all-sbom-results/${base_name}-sbom-cyclone.json"
-                
-                if [ -f "$spdx_file" ]; then
-                  spdx_link="✅ \`${base_name}-sbom-spdx.json\`"
-                else
-                  spdx_link="❌"
-                fi
-                
-                if [ -f "$cyclone_file" ]; then
-                  cyclone_link="✅ \`${base_name}-sbom-cyclone.json\`"
-                else
-                  cyclone_link="❌"
-                fi
-                
-                echo "| \`$image_name\` | $critical | $high | $total | $spdx_link | $cyclone_link |" >> consolidated-image-results/summary.md
-              fi
-            done
-            
-            {
-              echo ""
-              echo "## 🚨 Summary Totals"
-              echo ""
-              echo "- **Total Critical:** $total_critical"
-              echo "- **Total High:** $total_high"
-              echo "- **Overall Total:** $((total_critical + total_high))"
-              echo ""
-              echo "## 📎 Artifacts"
-              echo ""
-              echo "- 🔍 [Consolidated SARIF Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-              echo "- 📦 [All SBOMs Archive (all-sboms.tar.gz)](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-              echo "- 🛡️ [Security Tab Results](https://github.com/${{ github.repository }}/security/code-scanning)"
-              echo ""
-              if [ -f "consolidated-image-results/all-sboms.tar.gz" ]; then
-                echo "### 📋 SBOM Files Included:"
-                echo "\`\`\`"
-                tar -tzf consolidated-image-results/all-sboms.tar.gz | head -20
-                if [ $(tar -tzf consolidated-image-results/all-sboms.tar.gz | wc -l) -gt 20 ]; then
-                  echo "... and $(($(tar -tzf consolidated-image-results/all-sboms.tar.gz | wc -l) - 20)) more files"
-                fi
-                echo "\`\`\`"
-                echo ""
-              fi
-              echo "---"
-              echo "*Automated scan by [Helm Security Workflow](https://github.com/${{ github.repository }}/actions/workflows/${{ github.workflow }})*"
-            } >> consolidated-image-results/summary.md
-            
-          else
-            echo "⚠️ No SARIF files found to consolidate"
-            # Create empty SARIF file
-            echo '{"version": "2.1.0", "$schema": "https://json.schemastore.org/sarif-2.1.0.json", "runs": []}' > consolidated-image-results/umbrella-chart-scan.sarif
-            echo "# ✅ No vulnerabilities found in container images" > consolidated-image-results/summary.md
-          fi
-          
-          # Optional workflow failure on vulnerabilities
-          if [ "${{ env.FAIL_ON_VULNERABILITY }}" = "true" ]; then
-            if [ "$total_critical" -gt 0 ] || [ "$total_high" -gt 0 ]; then
-              echo "❌ FAIL_ON_VULNERABILITY is enabled and vulnerabilities were found:"
-              echo "   Critical: $total_critical, High: $total_high"
-              echo "🛡️ Please resolve vulnerabilities before proceeding"
-              exit 1
-            else
-              echo "✅ FAIL_ON_VULNERABILITY is enabled but no critical/high vulnerabilities found"
-            fi
-          fi
-
-      - name: Upload consolidated results
-        uses: actions/upload-artifact@v4
-        with:
-          name: consolidated-image-results
-          path: consolidated-image-results/
-          retention-days: 90
-          compression-level: 9
-
-      - name: Upload consolidated SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: consolidated-sbom-results
-          path: |
-            all-sbom-results/
-            consolidated-image-results/all-sboms.tar.gz
-          retention-days: 90
-          compression-level: 9
-
-      - name: Upload SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: consolidated-image-results/umbrella-chart-scan.sarif
-          category: helm-umbrella-chart-containers
-
-      - name: Comment container scan summary on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            try {
-              const summary = fs.readFileSync('consolidated-image-results/summary.md', 'utf8');
-              
-              await github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: summary
-              });
-            } catch (error) {
-              console.log('❌ Summary file not found or error creating comment:', error);
-            }
-
-  scan-helm-configs:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download rendered manifests
-        uses: actions/download-artifact@v4
-        with:
-          name: rendered-manifests
-          path: ${{ env.RENDERED_OUTPUT_PATH }}
-
-      - name: Scan Helm configurations with Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'config'
-          scan-ref: ${{ env.RENDERED_OUTPUT_PATH }}
-          format: 'sarif'
-          output: 'helm-config-scan.sarif'
-          severity: 'MEDIUM,HIGH,CRITICAL'
-
-      - name: Scan Helm configurations for summary
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'config'
-          scan-ref: ${{ env.RENDERED_OUTPUT_PATH }}
-          format: 'json'
-          output: 'helm-config-scan.json'
-          severity: 'MEDIUM,HIGH,CRITICAL'
-
-      - name: Create config scan summary
-        run: |
-          echo "# 🛡️ Helm Configuration Scan Summary" > config-summary.md
-          echo "" >> config-summary.md
-          echo "**Scan Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> config-summary.md
-          echo "**Target:** Rendered Helm manifests" >> config-summary.md
-          echo "" >> config-summary.md
-          
-          if [ -f helm-config-scan.json ]; then
-            critical=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity == "CRITICAL")] | length' helm-config-scan.json 2>/dev/null || echo "0")
-            high=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity == "HIGH")] | length' helm-config-scan.json 2>/dev/null || echo "0")
-            medium=$(jq '[.Results[]?.Misconfigurations[]? | select(.Severity == "MEDIUM")] | length' helm-config-scan.json 2>/dev/null || echo "0")
-            
-            echo "| Severity | Count |" >> config-summary.md
-            echo "|----------|-------|" >> config-summary.md
-            echo "| Critical | $critical |" >> config-summary.md
-            echo "| High | $high |" >> config-summary.md
-            echo "| Medium | $medium |" >> config-summary.md
-            echo "" >> config-summary.md
-            
-            if [ "$critical" -gt 0 ] || [ "$high" -gt 0 ]; then
-              echo "⚠️ **Action Required:** Critical or High severity misconfigurations found." >> config-summary.md
-            else
-              echo "✅ **Good News:** No critical or high severity misconfigurations detected." >> config-summary.md
-            fi
-          else
-            echo "❌ Configuration scan results not available." >> config-summary.md
-          fi
-          
-          echo "" >> config-summary.md
-          echo "📊 [View detailed results in Security tab](https://github.com/${{ github.repository }}/security/code-scanning)" >> config-summary.md
-
-      - name: Upload Helm config SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: helm-config-scan.sarif
-          category: helm-umbrella-chart-configs
-
-      - name: Comment config scan summary on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            try {
-              const summary = fs.readFileSync('config-summary.md', 'utf8');
-              
-              await github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: summary
-              });
-            } catch (error) {
-              console.log('❌ Config summary file not found or error creating comment:', error);
-            }
-
-      - name: Upload config scan results
-        uses: actions/upload-artifact@v4
-        with:
-          name: helm-config-scan-results
-          path: |
-            helm-config-scan.sarif
-            helm-config-scan.json
-            config-summary.md
-          retention-days: 30
-          compression-level: 9
-
-  notify-completion:
-    needs: [prepare-scan, scan-images, consolidate-results, scan-helm-configs]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Determine overall status
-        id: status
-        run: |
-          if [[ "${{ needs.prepare-scan.result }}" == "failure" || 
-                "${{ needs.scan-images.result }}" == "failure" || 
-                "${{ needs.consolidate-results.result }}" == "failure" || 
-                "${{ needs.scan-helm-configs.result }}" == "failure" ]]; then
-            echo "status=failed" >> $GITHUB_OUTPUT
-            echo "emoji=🚨" >> $GITHUB_OUTPUT
-          elif [[ "${{ needs.prepare-scan.result }}" == "success" && 
-                  "${{ needs.scan-images.result }}" == "success" && 
-                  "${{ needs.consolidate-results.result }}" == "success" && 
-                  "${{ needs.scan-helm-configs.result }}" == "success" ]]; then
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "emoji=✅" >> $GITHUB_OUTPUT
-          else
-            echo "status=partial" >> $GITHUB_OUTPUT
-            echo "emoji=⚠️" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create GitHub issue on failure
-        if: steps.status.outputs.status == 'failed' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const title = '🚨 Helm Umbrella Chart Security Scan Failed';
-            const body = `
-            The automated security scan for the Helm umbrella chart has failed.
-            
-            **Workflow:** ${{ github.workflow }}
-            **Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            **Triggered by:** ${{ github.event_name }}
-            **Commit:** ${{ github.sha }}
-            
-            ## Job Results
-            - **Prepare Scan:** ${{ needs.prepare-scan.result }}
-            - **Image Scanning:** ${{ needs.scan-images.result }}
-            - **Results Consolidation:** ${{ needs.consolidate-results.result }}
-            - **Config Scanning:** ${{ needs.scan-helm-configs.result }}
-            
-            Please investigate and resolve the issues before proceeding.
-            `;
-            
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: body,
-              labels: ['security', 'automation-failure', 'helm']
-            });
-
-      - name: Summary output
-        run: |
-          echo "${{ steps.status.outputs.emoji }} Helm Security Scan completed with status: ${{ steps.status.outputs.status }}"
-          echo "🔗 Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > final_images.txt
-          
-          # Create JSON array for matrix strategy
-          if [ -s final_images.txt ]; then
-            images_json=$(jq -R -s -c 'split("\n") | map(select(length > 0))' final_images.txt)
-            
-            # Create matrix with chunking for better performance (max 8 images per job)
-            # Using standard jq without custom functions - FIXED: floor division to avoid floating point
-            matrix_json=$(echo "$images_json" | jq -c '
-              [range(0; length; 8) as $i | 
-                {
-                  chunk: ($i / 8 | floor), 
-                  images: .[$i:$i+8]
-                }
-              ]
-            ')
-            
-            image_count=$(echo "$images_json" | jq 'length')
-            echo "✅ Found ${image_count} unique container images"
-          else
-            echo "⚠️ No container images found in rendered templates"
-            echo "🔧 This might be because:"
-            echo "   - Templates failed to render completely"
-            echo "   - Chart doesn't contain container workloads"
-            echo "   - Images are referenced differently than expected"
-            
-            images_json='[]'
-            matrix_json='[]'
-          fi
-          
-          # Set outputs with explicit labels
-          {
-            echo "images=${images_json}"
-            echo "matrix=${matrix_json}"
-          } >> $GITHUB_OUTPUT
-          
-          # Debug output
-          echo "=== Extracted Images ==="
-          cat final_images.txt || echo "No images found"
-          echo "======================="
-
-      - name: Upload rendered manifests
-        uses: actions/upload-artifact@v4
-        with:
-          name: rendered-manifests
-          path: ${{ env.RENDERED_OUTPUT_PATH }}
-          retention-days: 1
-          compression-level: 9
-
-  scan-images:
-    needs: prepare-scan
-    runs-on: ubuntu-latest
-    if: needs.prepare-scan.outputs.images != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.prepare-scan.outputs.matrix) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Cache Trivy DB
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/trivy
-          key: trivy-db-${{ github.run_id }}
-          restore-keys: |
-            trivy-db-
-
-      - name: Scan container images for vulnerabilities
-        run: |
-          mkdir -p scan-results sbom-results
-          
-          # Convert matrix images to newline-separated format
-          echo '${{ toJson(matrix.images) }}' | jq -r '.[]' > images_to_scan.txt
-          
-          echo "🔍 Scanning images in chunk ${{ matrix.chunk }}:"
-          cat images_to_scan.txt
-          
-          # Scan each image
-          while IFS= read -r image; do
-            if [ -n "$image" ]; then
-              echo "🔎 Scanning image: $image"
-              
-              # Create safe filename
-              safe_name=$(echo "$image" | sed 's/[^a-zA-Z0-9._-]/_/g')
-              
-              # Vulnerability scan with SARIF output
-              docker run --rm \
-                -v ~/.cache/trivy:/root/.cache/trivy \
-                -v "$(pwd)/scan-results:/output" \
-                aquasec/trivy:latest image \
-                --format sarif \
-                --output "/output/${safe_name}.sarif" \
-                --severity HIGH,CRITICAL \
-                --ignore-unfixed \
-                --timeout 10m \
-                "$image" || echo "❌ Failed to scan $image"
-                
-              # JSON output for summary
-              docker run --rm \
-                -v ~/.cache/trivy:/root/.cache/trivy \
-                -v "$(pwd)/scan-results:/output" \
-                aquasec/trivy:latest image \
-                --format json \
-                --output "/output/${safe_name}.json" \
-                --severity HIGH,CRITICAL \
-                --ignore-unfixed \
-                --timeout 10m \
-                "$image" || echo "❌ Failed to scan $image (JSON)"
-                
-              # Generate SBOM (SPDX format)
-              docker run --rm \
-                -v ~/.cache/trivy:/root/.cache/trivy \
-                -v "$(pwd)/sbom-results:/output" \
-                aquasec/trivy:latest image \
-                --format spdx-json \
-                --output "/output/${safe_name}-sbom-spdx.json" \
-                "$image" || echo "❌ Failed to generate SPDX SBOM for $image"
-                
-              # Generate SBOM (CycloneDX format for broader tool compatibility)
-              docker run --rm \
-                -v ~/.cache/trivy:/root/.cache/trivy \
-                -v "$(pwd)/sbom-results:/output" \
-                aquasec/trivy:latest image \
-                --format cyclonedx \
-                --output "/output/${safe_name}-sbom-cyclone.json" \
-                "$image" || echo "❌ Failed to generate CycloneDX SBOM for $image"
-            fi
-          done < images_to_scan.txt
-
-      - name: Upload scan results
-        uses: actions/upload-artifact@v4
-        with:
-          name: scan-results-chunk-${{ matrix.chunk }}
-          path: scan-results/
-          retention-days: 30
-          compression-level: 9
-
-      - name: Upload SBOM results
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-results-chunk-${{ matrix.chunk }}
-          path: sbom-results/
-          retention-days: 90
-          compression-level: 9
-
-  consolidate-results:
-    needs: [prepare-scan, scan-images]
-    runs-on: ubuntu-latest
-    if: always() && needs.prepare-scan.outputs.images != '[]'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download all scan results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: scan-results-chunk-*
-          merge-multiple: true
-          path: all-scan-results/
-
-      - name: Download all SBOM results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: sbom-results-chunk-*
-          merge-multiple: true
-          path: all-sbom-results/
-
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install jq
-          npm install -g @microsoft/sarif-multitool
-
-      - name: Consolidate results
-        run: |
-          mkdir -p consolidated-image-results
           
           # Find all SARIF files
           find all-scan-results -name "*.sarif" > sarif_files.txt
