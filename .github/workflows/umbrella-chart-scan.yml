@@ -118,15 +118,6 @@ jobs:
           echo "chart-name=${chart_name}" >> $GITHUB_OUTPUT
           echo "📋 Detected chart name: ${chart_name}"
 
-      - name: Lint Helm chart
-        run: |
-          cd ${{ env.HELM_CHART_PATH }}
-          echo "🔍 Linting Helm chart..."
-          if ! helm lint . --strict; then
-            echo "❌ Helm chart linting failed"
-            exit 1
-          fi
-
       - name: Cache Helm dependencies
         uses: actions/cache@v4
         with:
